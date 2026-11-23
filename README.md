@@ -9,7 +9,7 @@ A wireless, smartphone-controlled **DIY Digital Multimeter** powered by an **ESP
 - YouTube: [@techtadka360official](https://www.youtube.com/@techtadka360official)  
 - Instagram: [@techtadka360official](https://www.instagram.com/techtadka360official)  
 - GitHub: [Mr-soumik](https://github.com/Mr-soumik)
-- 
+- Facebook: [@techtadka360](https://www.facebook.com/share/1F3sa9eeeV/)
 ## Features
 
 - **Realistic Multimeter Web UI:** Custom HTML/CSS/JS dashboard modeled after a classic digital multimeter with a clickable rotary dial, live LCD readout, **HOLD** button, and **Backlight** toggle.
