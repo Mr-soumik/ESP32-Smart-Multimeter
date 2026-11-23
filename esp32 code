@@ -1,0 +1,198 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* ssid = "TechTadka360-Meter";
+const char* password = "techtadka360";
+WebServer server(80);
+
+// Pin Definitions
+const int PIN_REF = 25;    // 10k reference resistor
+const int PIN_BUZZ = 26;   // Buzzer (+)
+const int PIN_ADC_R = 33;  // 82k series resistor (Resistance / Continuity ADC)
+const int PIN_ADC_V = 34;  // 150k + 82k voltage divider midpoint (Voltage ADC)
+
+// Calibration Constants
+const float V_REF = 3.30;
+const float V_DIV_RATIO = 2.829; // (150k + 82k) / 82k
+const float R_EQUIV = 9586.8;    // 10k || 232k parallel equivalent resistance
+
+String currentMode = "OFF";
+bool isBeeping = false;
+float lastStableRx = -1.0;
+
+// Oversampled ADC voltage reader to eliminate fluctuations
+float readVoltage(int pin) {
+  long sum = 0;
+  for (int i = 0; i < 150; i++) {
+    sum += analogReadMilliVolts(pin);
+    delayMicroseconds(100);
+  }
+  return (sum / 150.0) / 1000.0;
+}
+
+// Hardware PWM buzzer controller (compatible with ESP32 Core v3.x)
+void setBuzzer(bool state) {
+  if (state && !isBeeping) {
+    ledcAttach(PIN_BUZZ, 2500, 8);
+    ledcWriteTone(PIN_BUZZ, 2500);
+    isBeeping = true;
+  } else if (!state && isBeeping) {
+    ledcWriteTone(PIN_BUZZ, 0);
+    ledcDetach(PIN_BUZZ);
+    pinMode(PIN_BUZZ, OUTPUT);
+    digitalWrite(PIN_BUZZ, LOW);
+    isBeeping = false;
+  }
+}
+
+void handleRoot() {
+  String h = F("<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+  "<meta name='viewport' content='width=device-width,initial-scale=1,user-scalable=no'>"
+  "<style>*{box-sizing:border-box;user-select:none;font-family:'Segoe UI',Arial,sans-serif}"
+  "body{margin:0;background:#111;display:flex;justify-content:center;align-items:center;min-height:100vh}"
+  ".m{width:335px;background:linear-gradient(145deg,#e52027,#b51218);border-radius:42px 42px 52px 52px;padding:13px;border:3px solid #8c0d12;box-shadow:0 20px 45px #000}"
+  ".f{background:#232528;border-radius:30px 30px 40px 40px;padding:12px 10px 15px;border:2px solid #151618}"
+  ".br{display:flex;justify-content:space-between;align-items:center;color:#fff;font-weight:800;font-size:13px;padding:0 6px 6px}"
+  ".lg{background:#d91e25;padding:2px 7px;border-radius:3px;letter-spacing:.5px}"
+  ".lcd{background:#9fa995;height:88px;border-radius:6px;padding:6px 10px;display:flex;flex-direction:column;justify-content:space-between;border:7px solid #141517;box-shadow:inset 0 3px 7px rgba(0,0,0,.4);transition:.25s}"
+  ".lcd.on{background:#bce4ff;box-shadow:inset 0 0 18px rgba(0,170,255,.6)}"
+  ".lt{display:flex;justify-content:space-between;font-size:10px;font-weight:800;color:#1b2018}"
+  ".lm{display:flex;justify-content:flex-end;align-items:baseline;font-family:'Courier New',monospace;font-weight:900;color:#121610}"
+  "#v{font-size:48px;letter-spacing:-2px}#u{font-size:16px;margin-left:5px}"
+  ".btns{display:flex;justify-content:space-between;align-items:flex-end;padding:6px 12px 0}"
+  ".blbl{font-size:9px;color:#ddd;font-weight:800;margin-bottom:2px}"
+  "button{width:62px;height:21px;border:none;border-radius:5px;font-weight:800;cursor:pointer;box-shadow:0 3px 0 #111}"
+  "button:active{transform:translateY(2px);box-shadow:0 1px 0 #111}"
+  ".bh{background:#f5b818}.bl{background:#5c9ed6;color:#fff;font-size:13px}"
+  ".da{position:relative;width:276px;height:266px;margin:0 auto}"
+  ".dl{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:136px;height:136px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#383b40,#15171a);border:4px solid #0e0f11;box-shadow:0 7px 16px rgba(0,0,0,.9),inset 0 2px 3px rgba(255,255,255,.15);display:flex;justify-content:center;align-items:center;cursor:pointer;z-index:2}"
+  ".kb{width:22px;height:120px;background:linear-gradient(90deg,#202226,#454951,#202226);border-radius:8px;box-shadow:0 3px 8px #000;transition:transform .3s cubic-bezier(.34,1.56,.64,1)}"
+  ".pt{width:5px;height:18px;background:#e52027;margin:5px auto 0;border-radius:2px}"
+  ".dt{position:absolute;width:5px;height:5px;border-radius:50%;background:#e5e7eb;transform:translate(-50%,-50%);pointer-events:none}"
+  ".lb{position:absolute;font-size:10px;font-weight:800;color:#e5e7eb;transform:translate(-50%,-50%);white-space:nowrap;pointer-events:none}"
+  ".act{cursor:pointer;pointer-events:auto;padding:3px 5px;border-radius:4px}"
+  ".act.a{color:#ffcf33;text-shadow:0 0 7px rgba(255,207,51,.9)}"
+  ".grp{position:absolute;font-weight:900;transform:translate(-50%,-50%);pointer-events:none}"
+  ".jk{display:flex;justify-content:space-between;padding:6px 14px 0;border-top:1px solid #32353a;text-align:center;font-size:10px;font-weight:800}"
+  ".hl{width:32px;height:32px;border-radius:50%;background:#0b0c0e;margin:3px auto 0;border:4px solid #3a3d42;box-shadow:inset 0 4px 7px #000}"
+  "</style></head><body><div class='m'><div class='f'>"
+  "<div class='br'><span class='lg'>TECHTADKA360</span><span style='font-size:10px;color:#bbb'>NCV</span><span>UT33D+</span></div>"
+  "<div class='lcd' id='l'><div class='lt'><span id='md'>OFF</span><span id='hd' style='visibility:hidden'>HOLD</span><span>APO</span></div>"
+  "<div class='lm'><span id='v'>---</span><span id='u'></span></div></div>"
+  "<div class='btns'><div><div class='blbl'>HOLD/SELECT</div><button class='bh' onclick='th()'></button></div>"
+  "<div><div class='blbl' style='text-align:center'>&#9728;</div><button class='bl' onclick='tl()'></button></div></div>"
+  "<div class='da' id='da'>"
+  "<div class='grp' style='top:58px;right:10px;color:#fff;font-size:13px'>V⎓</div>"
+  "<div class='grp' style='bottom:68px;right:12px;color:#fff;font-size:13px'>V~</div>"
+  "<div class='grp' style='top:62px;left:14px;color:#fff;font-size:14px'>Ω</div>"
+  "<div class='grp' style='bottom:12px;left:52px;color:#fff;font-size:12px'>A⎓</div>"
+  "<div class='grp' style='bottom:24px;right:20px;color:#d1d5db;font-size:12px'>CE</div>"
+  "<div class='dl' onclick='cm()'><div class='kb' id='k'><div class='pt'></div></div></div></div>"
+  "<div class='jk'><div style='color:#ddd'>10A<small>MAX</small><div class='hl'></div></div>"
+  "<div style='color:#f5b818'>COM<div class='hl'></div></div>"
+  "<div style='color:#ff4d4d'>VΩmA<div class='hl' style='border-color:#b51218'></div></div></div>"
+  "</div></div><script>"
+  "const ms=['OFF','VOLT','CONT','OHM'],ag={'OFF':0,'VOLT':52,'CONT':-126,'OHM':-70};let cmode='OFF',hld=0;"
+  "const pts=["
+  "{a:0,t:'| OFF |',m:'OFF',r:92},{a:18,t:'200m',m:'VOLT',r:92},{a:35,t:'2000m',m:'VOLT',r:95},"
+  "{a:52,t:'20',m:'VOLT',r:90},{a:70,t:'200',m:'VOLT',r:92},{a:88,t:'600',m:'VOLT',r:92},"
+  "{a:108,t:'600',m:'',r:92},{a:125,t:'200',m:'',r:92},{a:143,t:'NCV',m:'',r:93},"
+  "{a:162,t:'10',m:'',r:90},{a:180,t:'200m',m:'',r:92},{a:198,t:'20m',m:'',r:92},{a:216,t:'2000μ',m:'',r:96},"
+  "{a:234,t:'•)))',m:'CONT',r:92,c:'#f59b25'},{a:252,t:'200',m:'OHM',r:90},"
+  "{a:270,t:'2000',m:'OHM',r:93},{a:290,t:'20k',m:'OHM',r:91},{a:308,t:'200k',m:'OHM',r:93},"
+  "{a:326,t:'20M',m:'OHM',r:92},{a:343,t:'200M',m:'OHM',r:93}];"
+  "const da=document.getElementById('da');"
+  "pts.forEach(p=>{"
+  "let rad=(p.a-90)*Math.PI/180;"
+  "let d=document.createElement('div');d.className='dt';d.style.left=(138+76*Math.cos(rad))+'px';d.style.top=(133+76*Math.sin(rad))+'px';da.appendChild(d);"
+  "let l=document.createElement('div');l.className='lb'+(p.m?' act':'');if(p.m)l.dataset.m=p.m;if(p.c)l.style.color=p.c;"
+  "l.innerText=p.t;l.style.left=(138+p.r*Math.cos(rad))+'px';l.style.top=(133+p.r*Math.sin(rad))+'px';"
+  "if(p.m)l.onclick=()=>sm(p.m);da.appendChild(l);});"
+  "function sm(m){cmode=m;k.style.transform='rotate('+ag[m]+'deg)';document.querySelectorAll('.act').forEach(e=>e.classList.toggle('a',e.dataset.m===m));fetch('/mode?m='+m);}"
+  "sm('OFF');"
+  "function cm(){sm(ms[(ms.indexOf(cmode)+1)%4]);}"
+  "function th(){if(cmode!='OFF'){hld=!hld;hd.style.visibility=hld?'visible':'hidden';}}"
+  "function tl(){l.classList.toggle('on');}"
+  "setInterval(()=>{if(cmode=='OFF'){md.innerText='OFF';v.innerText='---';u.innerText='';return;}if(hld)return;"
+  "fetch('/data').then(r=>r.json()).then(d=>{md.innerText=d.l;v.innerText=d.v;u.innerText=d.u;}).catch(()=>{});},250);"
+  "</script></body></html>");
+  server.send(200, "text/html", h);
+}
+
+void handleMode() {
+  if (server.hasArg("m")) {
+    currentMode = server.arg("m");
+    lastStableRx = -1.0;
+    setBuzzer(false);
+    if (currentMode == "OHM" || currentMode == "CONT") {
+      pinMode(PIN_REF, OUTPUT);
+      digitalWrite(PIN_REF, HIGH);
+    } else {
+      pinMode(PIN_REF, INPUT_PULLDOWN);
+    }
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void handleData() {
+  String l = "", v = "0.00", u = "";
+  if (currentMode == "VOLT") {
+    l = "DC"; u = "V";
+    float vr = readVoltage(PIN_ADC_V) * V_DIV_RATIO;
+    v = (vr < 0.48) ? "0.00" : String(vr, 2);
+  } else if (currentMode == "OHM" || currentMode == "CONT") {
+    float vp = readVoltage(PIN_ADC_R);
+    if (currentMode == "CONT") {
+      l = "•)))";
+      if (vp <= 0.28) {
+        v = "000"; u = "Ω";
+      } else {
+        v = "OL"; u = "";
+      }
+    } else {
+      l = "Ω";
+      if (vp >= 3.10) {
+        v = "OL"; u = ""; lastStableRx = -1.0;
+      } else {
+        float vp_corr = (vp > 0.14) ? (vp - 0.14) : 0.0;
+        float rx = (R_EQUIV * vp_corr) / (V_REF - vp);
+        if (rx < 2.0) rx = 0.0;
+        if (lastStableRx < 0 || abs(rx - lastStableRx) > (lastStableRx * 0.03 + 3.0)) lastStableRx = rx;
+        else rx = lastStableRx;
+
+        if (rx < 1000.0) { v = String((int)round(rx)); u = "Ω"; }
+        else if (rx < 200000.0) { v = String(rx / 1000.0, 1); u = "kΩ"; }
+        else { v = "OL"; u = ""; }
+      }
+    }
+  }
+  server.send(200, "application/json", "{\"l\":\"" + l + "\",\"v\":\"" + v + "\",\"u\":\"" + u + "\"}");
+}
+
+void setup() {
+  pinMode(PIN_REF, INPUT_PULLDOWN);
+  pinMode(PIN_BUZZ, OUTPUT);
+  digitalWrite(PIN_BUZZ, LOW);
+  analogReadResolution(12);
+
+  // Startup buzzer test beep
+  setBuzzer(true);
+  delay(200);
+  setBuzzer(false);
+
+  WiFi.softAP(ssid, password);
+  server.on("/", handleRoot);
+  server.on("/mode", handleMode);
+  server.on("/data", handleData);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  if (currentMode == "CONT") {
+    float vp = analogReadMilliVolts(PIN_ADC_R) / 1000.0;
+    setBuzzer(vp <= 0.28);
+  } else if (isBeeping) {
+    setBuzzer(false);
+  }
+}
